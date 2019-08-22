@@ -92,12 +92,13 @@ public struct SuperMirror<Subject>: CustomReflectable {
     /// `descendant(_:_:)` method, labels are used for lookup.
     public typealias Child = Mirror.Child
 
-    /// A suggestion of how a mirror's subject is to be interpreted.
-    ///
-    /// Playgrounds and the debugger will show a representation similar
-    /// to the one used for instances of the kind indicated by the
-    /// `DisplayStyle` case name when the mirror is used for display.
-    public typealias DisplayStyle = Mirror.DisplayStyle
+    public enum DisplayStyle {
+        case tuple
+        case `struct`
+        case `enum`
+        case `class`
+        case none
+    }
 
     fileprivate let subject: Subject
 
@@ -105,7 +106,7 @@ public struct SuperMirror<Subject>: CustomReflectable {
 
     fileprivate let children: [Child]
 
-    fileprivate let displayStyle: DisplayStyle?
+    fileprivate let displayStyle: DisplayStyle
 
     fileprivate let makeSuperclassMirror: () -> SuperMirror<Any>?
 
@@ -152,12 +153,20 @@ public struct SuperMirror<Subject>: CustomReflectable {
 
         let rawDisplayStyle = _getDisplayStyle(subject)
         switch UnicodeScalar(Int(rawDisplayStyle)) {
-        case "c": displayStyle = .class
-        case "e": displayStyle = .enum
-        case "s": displayStyle = .struct
-        case "t": displayStyle = .tuple
-        case "\0": displayStyle = nil
-        default: preconditionFailure("Unknown raw display style '\(rawDisplayStyle)'")
+        case "c":
+            displayStyle = .class
+        case "e":
+            displayStyle = .enum
+        case "s":
+            displayStyle = .struct
+        case "t":
+            displayStyle = .tuple
+        case "\0":
+            // This is a metatype, opaque value or something else.
+            // They have no children.
+            displayStyle = .none
+        default:
+            fatalError("Unknown raw display style '\(rawDisplayStyle)'")
         }
 
         self.subjectType = subjectType
@@ -240,7 +249,7 @@ public func children<Subject>(
 /// A suggested display style for the reflected subject.
 public func displayStyle<Subject>(
     _ mirror: SuperMirror<Subject>
-) -> SuperMirror<Subject>.DisplayStyle? {
+) -> SuperMirror<Subject>.DisplayStyle {
     return mirror.displayStyle
 }
 
@@ -579,86 +588,80 @@ internal func adHocPrintUnlocked<Subject, TargetStream: TextOutputStream>(
         target.write(_typeName(type, qualified: isDebugPrint))
     }
 
-    if let displayStyle = mirror.displayStyle {
-        switch displayStyle {
-        case .optional:
-            if let child = mirror.children.first {
-                _debugPrint_unlocked(child.1, &target)
+    switch mirror.displayStyle {
+    case .tuple:
+        target.write("(")
+        var first = true
+        for (label, value) in mirror.children {
+            if first {
+                first = false
             } else {
-                _debugPrint_unlocked("nil", &target)
+                target.write(", ")
             }
-        case .tuple:
-            target.write("(")
-            var first = true
-            for (label, value) in mirror.children {
+
+            if let label = label {
+                if !label.isEmpty && label[label.startIndex] != "." {
+                    target.write(label)
+                    target.write(": ")
+                }
+            }
+
+            _debugPrint_unlocked(value, &target)
+        }
+        target.write(")")
+    case .struct:
+        printTypeName(mirror.subjectType)
+        target.write("(")
+        var first = true
+        for (label, value) in mirror.children {
+            if let label = label {
                 if first {
                     first = false
                 } else {
                     target.write(", ")
                 }
-
-                if let label = label {
-                    if !label.isEmpty && label[label.startIndex] != "." {
-                        target.write(label)
-                        target.write(": ")
-                    }
-                }
-
+                target.write(label)
+                target.write(": ")
                 _debugPrint_unlocked(value, &target)
             }
-            target.write(")")
-        case .struct:
-            printTypeName(mirror.subjectType)
-            target.write("(")
-            var first = true
-            for (label, value) in mirror.children {
-                if let label = label {
-                    if first {
-                        first = false
-                    } else {
-                        target.write(", ")
-                    }
-                    target.write(label)
-                    target.write(": ")
-                    _debugPrint_unlocked(value, &target)
-                }
-            }
-            target.write(")")
-        case .enum:
-            if let cString = _getEnumCaseName(value),
-                let caseName = String(validatingUTF8: cString) {
-                // Write the qualified type name in debugPrint.
-                if isDebugPrint {
-                    printTypeName(mirror.subjectType)
-                    target.write(".")
-                }
-                target.write(caseName)
-            } else {
-                // If the case name is garbage, just print the type name.
-                printTypeName(mirror.subjectType)
-            }
-            if let (_, value) = mirror.children.first {
-                if Mirror(reflecting: value).displayStyle == .tuple {
-                    _debugPrint_unlocked(value, &target)
-                } else {
-                    target.write("(")
-                    _debugPrint_unlocked(value, &target)
-                    target.write(")")
-                }
-            }
-        default:
-            target.write(_typeName(mirror.subjectType))
         }
-    } else if let metatypeValue = value as? Any.Type {
-        // Metatype
-        printTypeName(metatypeValue)
-    } else {
-        // Fall back to the type or an opaque summary of the kind
-        if let cString = _opaqueSummary(mirror.subjectType),
-            let opaqueSummary = String(validatingUTF8: cString) {
-            target.write(opaqueSummary)
+        target.write(")")
+    case .enum:
+        if let cString = _getEnumCaseName(value),
+            let caseName = String(validatingUTF8: cString) {
+            // Write the qualified type name in debugPrint.
+            if isDebugPrint {
+                printTypeName(mirror.subjectType)
+                target.write(".")
+            }
+            target.write(caseName)
         } else {
-            target.write(_typeName(mirror.subjectType, qualified: true))
+            // If the case name is garbage, just print the type name.
+            printTypeName(mirror.subjectType)
+        }
+        if let (_, value) = mirror.children.first {
+            if SuperMirror(value).displayStyle == .tuple {
+                _debugPrint_unlocked(value, &target)
+            } else {
+                target.write("(")
+                _debugPrint_unlocked(value, &target)
+                target.write(")")
+            }
+        }
+    case .class:
+        target.write(_typeName(mirror.subjectType))
+    case .none:
+        if let metatypeValue = value as? Any.Type {
+            // Metatype
+            printTypeName(metatypeValue)
+        } else {
+            // Fall back to the type or an opaque summary of the kind
+            if let cString = _opaqueSummary(mirror.subjectType),
+                let opaqueSummary = String(validatingUTF8: cString) {
+                target.write(opaqueSummary)
+            } else {
+                target.write(_typeName(mirror.subjectType, qualified: true))
+            }
         }
     }
 }
@@ -668,18 +671,14 @@ private func dumpPrintUnlocked<Subject, TargetStream: TextOutputStream>(
     _ mirror: SuperMirror<Subject>,
     _ target: inout TargetStream
 ) {
-    if let displayStyle = mirror.displayStyle {
-        switch displayStyle {
-        case .tuple:
-            let count = mirror.children.count
-            target.write("tuple ")
-            target.write(count == 1 ? "(1 element)" : "(\(count) elements)")
-            return
-        case .class, .struct, .enum:
-            break
-        default:
-            fatalError("unreachable")
-        }
+    switch mirror.displayStyle {
+    case .tuple:
+        let count = mirror.children.count
+        target.write("tuple ")
+        target.write(count == 1 ? "(1 element)" : "(\(count) elements)")
+        return
+    case .class, .struct, .enum, .none:
+        break
     }
 
     let usesCustomDescription: Bool
@@ -705,23 +704,22 @@ private func dumpPrintUnlocked<Subject, TargetStream: TextOutputStream>(
         }
     }
 
-    if let displayStyle = mirror.displayStyle {
-        switch displayStyle {
-        case .class:
-            target.write("class ")
-        case .struct:
-            target.write("struct ")
-        case .enum:
-            target.write("enum ")
-        default:
-            fatalError("unreachable")
-        }
-
-        target.write(_typeName(mirror.subjectType, qualified: true))
+    switch mirror.displayStyle {
+    case .class:
+        target.write("class ")
+    case .struct:
+        target.write("struct ")
+    case .enum:
+        target.write("enum ")
+    case .tuple:
+        // Already handled
+        fatalError("unreachable")
+    case .none:
+        adHocPrintUnlocked(value, mirror, &target, isDebugPrint: true)
         return
     }
 
-    adHocPrintUnlocked(value, mirror, &target, isDebugPrint: true)
+    target.write(_typeName(mirror.subjectType, qualified: true))
 }
 
 // MARK: - StdOut
